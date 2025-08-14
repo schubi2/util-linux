@@ -6,6 +6,9 @@
 #include <sys/syslog.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
+#include <dirent.h>
+#endif
 #include "config-files.h"
 #include "list.h"
 #include "xalloc.h"
@@ -60,7 +63,104 @@ static struct file_element *new_list_entry(const char *filename)
 	return file_element;
 }
 
-int  config_file_list( struct list_head *file_list,
+static int issuedir_filter(const struct dirent *d)
+{
+#ifdef _DIRENT_HAVE_D_TYPE
+	if (d->d_type != DT_UNKNOWN && d->d_type != DT_REG &&
+	    d->d_type != DT_LNK)
+		return 0;
+#endif
+	if (*d->d_name == '.')
+		return 0;
+
+	/* Accept this */
+	return 1;
+}
+
+static int  read_dir( struct list_head *file_list,
+		      const char *project,
+		      const char *root,
+		      const char *config_name,
+		      const char *config_suffix)
+{
+	bool found = false;
+	char *dirname = NULL;
+	struct stat st;
+	int dd, nfiles, i;
+	int counter = 0;
+        struct dirent **namelist = NULL;
+
+	INIT_LIST_HEAD(file_list);
+
+#if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
+
+	if (config_suffix) {
+		xasprintf(&dirname, "%s/%s/%s.%s.d",
+			  root, project, config_name, config_suffix);
+		if (stat(dirname, &st) == 0) {
+			found = true;
+		} else {
+			free(dirname);
+			dirname = NULL;
+		}
+	}
+	if (!found) {
+		/* trying path without suffix */
+		xasprintf(&dirname, "%s/%s/%s.d", root, project, config_name);
+		if (stat(dirname, &st) != 0) {
+			/* not found */
+			free(dirname);
+			dirname = NULL;
+		}
+	}
+
+	if (dirname==NULL)
+		return 0;
+
+	dd = open(dirname, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+	if (dd < 0) {
+		free(dirname);
+		return 0;
+	}
+
+	nfiles = scandirat(dd, ".", &namelist, issuedir_filter, alphasort);
+	if (nfiles <= 0) {
+		free(dirname);
+		return 0;
+	}
+
+	for (i = 0; i < nfiles; i++) {
+		struct dirent *d = namelist[i];
+		size_t namesz = strlen(d->d_name);
+		if (strlen(config_suffix)>0 &&
+		    (!namesz || namesz < strlen(config_suffix) + 1 ||
+		     strcmp(d->d_name + (namesz - strlen(config_suffix)), config_suffix) != 0)) {
+			/* filename does not have requested suffix */
+			continue;
+		}
+		struct file_element *entry = new_list_entry(d->d_name);
+		list_add_tail(&entry->file_list, file_list);
+		counter++;
+	}
+
+	for (i = 0; i < nfiles; i++)
+		free(namelist[i]);
+	free(namelist);
+        free(dirname);
+	close(dd);
+	return counter;
+#else /* defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT) */
+	return 0;
+#endif
+}
+
+static void free_element(struct file_element *element)
+{
+	free(element->filename);
+}
+
+
+size_t config_file_list( struct list_head *file_list,
                        const char *project,
 		       const char *etc_subdir,
 		       const char *usr_subdir,
@@ -68,6 +168,11 @@ int  config_file_list( struct list_head *file_list,
 		       const char *config_suffix)
 {
 	char *filename = NULL;
+	struct list_head *etc_file_list = NULL;
+	struct list_head *usr_file_list = NULL;
+	size_t etc_count = 0;
+	size_t usr_count = 0;
+	struct list_head *etc_entry, *usr_entry;
 
 	INIT_LIST_HEAD(file_list);
 	
@@ -86,8 +191,6 @@ int  config_file_list( struct list_head *file_list,
 	if (!project)
 		project = "";
 
-        bool found = false;
-	
 	/* Evaluating first "main" file which has to be parsed */
 	/* in the following order : /etc /run /usr             */
  	filename = main_config_file(etc_subdir, project, config_name, config_suffix);
@@ -99,256 +202,47 @@ int  config_file_list( struct list_head *file_list,
 		struct file_element *entry = new_list_entry(filename);
 		list_add_tail(&entry->file_list, file_list);
 	}
-		
-	
-	return 0;
+
+        etc_count = read_dir(etc_file_list,
+			     project,
+			     etc_subdir,
+			     config_name,
+			     config_suffix);
+        usr_count = read_dir(usr_file_list,
+			     project,
+			     etc_subdir,
+			     config_name,
+			     config_suffix);
+
+	if (etc_count > 0) {
+		list_for_each(etc_entry, etc_file_list) {
+			struct file_element *etc_element;
+
+			etc_element = list_entry(etc_entry, struct file_element, file_list);
+			list_for_each(usr_entry, usr_file_list) {
+				struct file_element *usr_element;
+				usr_element = list_entry(usr_entry, struct file_element, file_list);
+				if (strcmp(usr_element->filename, etc_element->filename) <= 0) {
+					list_add_tail(&usr_element->file_list, file_list);
+					if (strcmp(usr_element->filename, etc_element->filename) < 0)
+						list_del(&usr_element->file_list);
+				} else {
+					break;
+				}
+			}
+			list_add_tail(&etc_element->file_list, file_list);
+		}
+	}
+
+	/* take the rest of /usr */
+	list_for_each(usr_entry, usr_file_list) {
+		struct file_element *usr_element;
+		usr_element = list_entry(usr_entry, struct file_element, file_list);
+		list_add_tail(&usr_element->file_list, file_list);
+	}
+
+	list_free(etc_file_list, struct file_element,  file_list, free_element);
+	list_free(usr_file_list, struct file_element,  file_list, free_element);
+
+	return list_count_entries(file_list);
 }
-
-#if 0
-
-
-gboolean
-g_key_file_load_unix_configurations (GKeyFile       *key_file,
-                                     const gchar    *project,
-                                     const gchar    *etc_subdir,
-                                     const gchar    *usr_subdir,
-                                     const gchar    *config_name,
-                                     const gchar    *config_suffix,
-                                     GKeyFileFlags  flags,
-                                     GError         **error)
-{
-  gchar *path = NULL;
-  gchar *scan_dir = NULL;
-  int fd = 0;
-  int cmp_ret = 0;
-  GDir *dir;
-  gchar *filename = NULL;
-  const gchar *file = NULL;
-  gboolean ret = TRUE;
-  GError *key_file_error = NULL;
-  GList *parsing_list = NULL;
-  GList *etc_list = NULL;
-  GList *ptr_etc_list = NULL;
-  GList *usr_list = NULL;
-  GList *ptr_usr_list = NULL;
-  GKeyFile *parsed_key_file = g_key_file_new();
-  gchar** groups = NULL;
-  gchar** groups_ptr = NULL;
-  gchar** keys = NULL;
-  gchar** keys_ptr = NULL;
-  gchar*  value = NULL;
-  if (!config_name)
-    {
-      g_set_error_literal (error, G_KEY_FILE_ERROR,
-                           G_KEY_FILE_ERROR_PARSE,
-                           _("config_name must be a valid value"));
-      return FALSE;
-    }
-  if (!key_file)
-    {
-      g_set_error_literal (error, G_KEY_FILE_ERROR,
-                           G_KEY_FILE_ERROR_PARSE,
-                           _("key_file must be a valid value"));
-      return FALSE;
-    }
-
-  /* Default is /etc */
-  if (!etc_subdir)
-    etc_subdir = "/etc";
-
-  if (!usr_subdir)
-    usr_subdir = "";
-
-  if (config_suffix)
-    filename = g_strdup_printf ("%s.%s", config_name, config_suffix);
-  else
-    filename = g_strdup (config_name);
-
-  if (!project)
-    project = "";
-
-    /* Evaluating first "main" file which has to be parsed */
-  path = g_build_filename (etc_subdir, project, filename, NULL);
-  fd = g_open (path, O_RDONLY | O_CLOEXEC, 0);
-  if (fd == -1)
-    {
-      g_free (path);
-      path = g_build_filename ("/run", project, filename, NULL);
-      fd = g_open (path, O_RDONLY | O_CLOEXEC, 0);
-    }
-  if (fd == -1)
-    {
-      g_free (path);
-      path = g_build_filename (usr_subdir, project, filename, NULL);
-      fd = g_open (path, O_RDONLY | O_CLOEXEC, 0);
-    }
-  if (fd != -1)
-    parsing_list = g_list_append (parsing_list, path);
-  else
-    g_free (path);
-
-    /* Evaluting all plugin files which has to be parsed and insert it into
-     the list in the correct order */
-  g_free(filename);
-  if (config_suffix)
-    filename = g_strdup_printf ("%s.%s.d", config_name, config_suffix);
-  else
-    filename = g_strdup_printf ("%s.d", config_name);
-
-  scan_dir = g_build_filename (usr_subdir, project, filename, NULL);
-  dir = g_dir_open(scan_dir, 0, &key_file_error);
-  if (dir)
-    {
-      while ((file = g_dir_read_name(dir)) != NULL)
-        {
-          usr_list = g_list_insert_sorted (usr_list, g_strdup (file), cmp_str_function);
-        }
-      g_dir_close(dir);
-    }
-  if (key_file_error)
-    {
-      g_error_free (key_file_error);
-      key_file_error = NULL;
-    }
-  g_free(scan_dir);
-  scan_dir = g_build_filename (etc_subdir, project, filename, NULL);
-  dir = g_dir_open(scan_dir, 0, &key_file_error);
-  if (dir)
-    {
-      while ((file = g_dir_read_name(dir)) != NULL)
-        {
-          etc_list = g_list_insert_sorted (etc_list, g_strdup (file), cmp_str_function);
-        }
-      g_dir_close(dir);
-    }
-  if (key_file_error)
-    {
-      g_error_free (key_file_error);
-      key_file_error = NULL;
-    }
-  g_free(scan_dir);
-
-  ptr_usr_list = usr_list;
-  ptr_etc_list = etc_list;
-
-  while (ptr_etc_list != NULL)
-    {
-      while (ptr_usr_list != NULL)
-        {
-          cmp_ret = g_strcmp0 ((const gchar *)(ptr_usr_list->data),
-                               (const gchar *)(ptr_etc_list->data));
-          if (cmp_ret < 0)
-            {
-              parsing_list = g_list_append (parsing_list,
-                                            g_build_filename (usr_subdir, project, filename, ptr_usr_list->data, NULL));
-              ptr_usr_list = ptr_usr_list->next;
-            }
-          else
-            {
-              if (cmp_ret == 0)
-                {
-                  ptr_usr_list = ptr_usr_list->next;
-                }
-              break;
-            }
-        }
-      parsing_list = g_list_append (parsing_list,
-        g_build_filename (etc_subdir, project, filename, ptr_etc_list->data, NULL));
-      ptr_etc_list = ptr_etc_list->next;
-    }
-  while (ptr_usr_list != NULL)
-    {
-      parsing_list = g_list_append (parsing_list,
-                                    g_build_filename (usr_subdir, project, filename, ptr_usr_list->data, NULL));
-      ptr_usr_list = ptr_usr_list->next;
-    }
-  g_free(filename);
-  /* Parsing all configuration files in the correct order and merging the entries.*/
-  for (GList *l = parsing_list; l != NULL; l = l->next)
-    {
-      fd = g_open ((const gchar *) (l->data), O_RDONLY | O_CLOEXEC, 0);
-      if (fd != -1)
-        {
-          if (g_key_file_load_from_fd (parsed_key_file, fd, flags, &key_file_error))
-            {
-              if (key_file_error)
-                {
-                  g_propagate_error (error, key_file_error);
-                  ret = FALSE;
-                  g_error_free (key_file_error);
-                  key_file_error = NULL;
-                }
-
-              groups = g_key_file_get_groups (parsed_key_file, NULL);
-              groups_ptr = groups;
-              while (*groups_ptr)
-                {
-                  keys_ptr = g_key_file_get_keys (parsed_key_file,
-                                                  *groups_ptr,
-                                                  NULL,
-                                                  &key_file_error);
-                  if (key_file_error)
-                    {
-                      g_propagate_error (error, key_file_error);
-                      ret = FALSE;
-                      g_error_free (key_file_error);
-                      key_file_error = NULL;
-                    }
-                  while (*keys_ptr)
-                    {
-                      value = g_key_file_get_value (parsed_key_file,
-                                                    *groups_ptr,
-                                                    *keys_ptr,
-                                                    &key_file_error);
-                      if (key_file_error)
-                        {
-                          g_propagate_error (error, key_file_error);
-                          ret = FALSE;
-                          g_error_free (key_file_error);
-                          key_file_error = NULL;
-                        }
-                      else
-                        {
-                          g_key_file_set_value (key_file,
-                                                *groups_ptr,
-                                                *keys_ptr,
-                                                value);
-                          if (key_file_error)
-                            {
-                              g_propagate_error (error, key_file_error);
-                              ret = FALSE;
-                              g_error_free (key_file_error);
-                              key_file_error = NULL;
-                            }
-                        }
-                      keys_ptr++;
-                    }
-                  g_strfreev (keys);
-                  groups_ptr++;
-                }
-              g_strfreev (groups);
-              g_key_file_free(parsed_key_file);
-              parsed_key_file = g_key_file_new ();
-            }
-          close (fd);
-        }
-    }
-
-  g_list_free_full(usr_list, g_free);
-  g_list_free_full(etc_list, g_free);
-  if (parsing_list == NULL)
-    {
-      g_set_error_literal (error, G_KEY_FILE_ERROR,
-                           G_KEY_FILE_ERROR_NOT_FOUND,
-                           _("Valid key file could not be "
-                             "found in search dirs"));
-      ret = FALSE;
-    }
-  else
-    {
-      g_list_free_full(parsing_list, g_free);
-      g_key_file_free(parsed_key_file);
-    }
-  return ret;
-}
-#endif

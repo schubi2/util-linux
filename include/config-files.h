@@ -30,7 +30,7 @@ struct file_element {
  * Returns the length of the file_list.
  *
  * Example:
- * int count = 0;
+ * size_t count = 0;
  * count = config_file_list (key_file,
  *                           "foo",
  *                           "/etc",
@@ -67,8 +67,7 @@ struct file_element {
  * I.e. Existing /etc/foo/example.d/foobar.conf overrides /usr/lib/foo/example.d/foobar.conf
  */
 
-
-int  config_file_list( struct list_head *file_list,
+size_t config_file_list( struct list_head *file_list,
                        const char *project,
 		       const char *etc_subdir,
 		       const char *usr_subdir,
