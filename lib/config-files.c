@@ -6,12 +6,14 @@
 #include <sys/syslog.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
 #include <dirent.h>
 #endif
 #include "config-files.h"
 #include "list.h"
-#include "xalloc.h"
 #include "fileutils.h"
 
 #define DEFAULT_ETC_SUBDIR "/etc"
@@ -31,7 +33,8 @@ static char *main_config_file(const char *root,
 	struct stat st;
 	
 	if (config_suffix) {
-		xasprintf(&path, "%s/%s/%s.%s", root, project, config_name, config_suffix);
+		if (asprintf(&path, "%s/%s/%s.%s", root, project, config_name, config_suffix) < 0)
+			return NULL;
 		if (stat(path, &st) == 0) {
 			found = true;
 		} else {
@@ -41,7 +44,8 @@ static char *main_config_file(const char *root,
 	}
 	if (!found) {
 		/* trying filename without suffix */
-		xasprintf(&path, "%s/%s/%s", root, project, config_name);
+		if (asprintf(&path, "%s/%s/%s", root, project, config_name) < 0)
+			return NULL;
 		if (stat(path, &st) != 0) {
 			/* not found */
 			free(path);
@@ -53,14 +57,22 @@ static char *main_config_file(const char *root,
 
 static struct file_element *new_list_entry(const char *filename)
 {
-	struct file_element *file_element = xcalloc(1, sizeof(*file_element));
+	struct file_element *file_element = calloc(1, sizeof(*file_element));
+
+	if (file_element == NULL)
+		return NULL;
 
 	INIT_LIST_HEAD(&file_element->file_list);
 
-	if (filename != NULL)
-		file_element->filename = xstrdup(filename);
-	else
+	if (filename != NULL) {
+		file_element->filename = strdup(filename);
+		if (file_element->filename == NULL) {
+			free(file_element);
+			return NULL;
+		}
+	} else {
 		file_element->filename = NULL;
+	}
 
 	return file_element;
 }
@@ -81,11 +93,11 @@ static int issuedir_filter(const struct dirent *d)
 	return 1;
 }
 
-static int  read_dir( struct list_head *file_list,
-		      const char *project,
-		      const char *root,
-		      const char *config_name,
-		      const char *config_suffix)
+static int read_dir( struct list_head *file_list,
+		     const char *project,
+		     const char *root,
+		     const char *config_name,
+		     const char *config_suffix)
 {
 	bool found = false;
 	char *dirname = NULL;
@@ -97,8 +109,9 @@ static int  read_dir( struct list_head *file_list,
 	struct file_element *entry = NULL;
 
 	if (config_suffix) {
-		xasprintf(&dirname, "%s/%s/%s.%s.d",
-			  root, project, config_name, config_suffix);
+		if (asprintf(&dirname, "%s/%s/%s.%s.d",
+			     root, project, config_name, config_suffix) < 0)
+			return -ENOMEM;
 		if (stat(dirname, &st) == 0) {
 			found = true;
 		} else {
@@ -108,7 +121,8 @@ static int  read_dir( struct list_head *file_list,
 	}
 	if (!found) {
 		/* trying path without suffix */
-		xasprintf(&dirname, "%s/%s/%s.d", root, project, config_name);
+		if (asprintf(&dirname, "%s/%s/%s.d", root, project, config_name) < 0)
+			return -ENOMEM;
 		if (stat(dirname, &st) != 0) {
 			/* not found */
 			free(dirname);
@@ -141,8 +155,16 @@ static int  read_dir( struct list_head *file_list,
 			continue;
 		}
 
-		xasprintf(&filename, "%s/%s", dirname, d->d_name);
+		if (asprintf(&filename, "%s/%s", dirname, d->d_name) < 0) {
+			counter = -ENOMEM;
+			break;
+		}
 		entry = new_list_entry(filename);
+		if (entry == NULL) {
+			counter = -ENOMEM;
+			break;
+		}
+
 		list_add_tail(&entry->file_list, file_list);
 		counter++;
 	}
@@ -163,18 +185,19 @@ static void free_element(struct file_element *element)
 }
 
 
-size_t config_file_list( struct list_head *file_list,
-                       const char *project,
-		       const char *etc_subdir,
-		       const char *usr_subdir,
-		       const char *config_name,
-		       const char *config_suffix)
+int config_file_list( struct list_head *file_list,
+		      const char *project,
+		      const char *etc_subdir,
+		      const char *usr_subdir,
+		      const char *config_name,
+		      const char *config_suffix)
 {
 	char *filename = NULL, *usr_basename = NULL, *etc_basename = NULL;
 	struct list_head etc_file_list;
 	struct list_head usr_file_list;
 	struct list_head *etc_entry = NULL, *usr_entry = NULL;
 	struct file_element *add_element = NULL, *usr_element = NULL, *etc_element = NULL;
+	int ret_usr = 0, ret_etc = 0, counter = 0;
 	
 	INIT_LIST_HEAD(file_list);
 
@@ -202,23 +225,30 @@ size_t config_file_list( struct list_head *file_list,
 		filename = main_config_file(usr_subdir, project, config_name, config_suffix);
 	if (filename != NULL) {
 		add_element = new_list_entry(filename);
+		if (add_element == NULL)
+			return -ENOMEM;
 		list_add_tail(&add_element->file_list, file_list);
+		counter++;
 	}
 
 	INIT_LIST_HEAD(&etc_file_list);
 	INIT_LIST_HEAD(&usr_file_list);
 
 #if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
-        read_dir(&etc_file_list,
-		 project,
-		 etc_subdir,
-		 config_name,
-		 config_suffix);
-        read_dir(&usr_file_list,
-		 project,
-		 usr_subdir,
-		 config_name,
-		 config_suffix);
+        ret_etc = read_dir(&etc_file_list,
+			   project,
+			   etc_subdir,
+			   config_name,
+			   config_suffix);
+	ret_usr = read_dir(&usr_file_list,
+			   project,
+			   usr_subdir,
+			   config_name,
+			   config_suffix);
+	if (ret_etc == -ENOMEM || ret_usr == -ENOMEM) {
+		counter = -ENOMEM;
+		goto finish;
+	}
 #endif
 
 	list_for_each(etc_entry, &etc_file_list) {
@@ -230,7 +260,12 @@ size_t config_file_list( struct list_head *file_list,
 			if (strcmp(usr_basename, etc_basename) <= 0) {
 				if (strcmp(usr_basename, etc_basename) < 0) {
 					add_element = new_list_entry(usr_element->filename);
+					if (add_element == NULL) {
+						counter = -ENOMEM;
+						goto finish;
+					}
 					list_add_tail(&add_element->file_list, file_list);
+					counter++;
 				}
 				list_del(&usr_element->file_list);
 			} else {
@@ -238,18 +273,29 @@ size_t config_file_list( struct list_head *file_list,
 			}
 		}
 		add_element = new_list_entry(etc_element->filename);
+		if (add_element == NULL) {
+			counter = -ENOMEM;
+			goto finish;
+		}
 		list_add_tail(&add_element->file_list, file_list);
+		counter++;
 	}
 
 	/* taking the rest of /usr */
 	list_for_each(usr_entry, &usr_file_list) {
 		usr_element = list_entry(usr_entry, struct file_element, file_list);
 		add_element = new_list_entry(usr_element->filename);
+		if (add_element == NULL) {
+			counter = -ENOMEM;
+			goto finish;
+		}
 		list_add_tail(&add_element->file_list, file_list);
+		counter++;
 	}
 
+finish:
 	list_free(&etc_file_list, struct file_element,  file_list, free_element);
 	list_free(&usr_file_list, struct file_element,  file_list, free_element);
 
-	return list_count_entries(file_list);
+	return counter;
 }

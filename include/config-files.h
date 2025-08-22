@@ -28,10 +28,10 @@ struct file_element {
  * @config_name: basename of the configuration file. If it is NULL, drop-ins without a main configuration file will be parsed only. 
  * @config_suffix: suffix of the configuration file. Can also be NULL.
  *
- * Returns the length of the file_list.
+ * Returns the length of the file_list or -ENOMEM
  *
  * Example:
- * size_t count = 0;
+ * int count = 0;
  * struct list_head *file_list;
  *
  * count = config_file_list (&file_list,
@@ -46,10 +46,10 @@ struct file_element {
  *
  */
 
-size_t config_file_list( struct list_head *file_list,
-			 const char *project,
-			 const char *etc_subdir,
-			 const char *usr_subdir,
-			 const char *config_name,
-			 const char *config_suffix);
+int config_file_list( struct list_head *file_list,
+		      const char *project,
+		      const char *etc_subdir,
+		      const char *usr_subdir,
+		      const char *config_name,
+		      const char *config_suffix);
 #endif
