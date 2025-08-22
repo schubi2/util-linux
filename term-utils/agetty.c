@@ -1934,10 +1934,12 @@ static void print_issue_file(struct issue *ie,
 #endif
 }
 
+#ifdef 	ISSUEDIR_SUPPORT
 static void free_element(struct file_element *element)
 {
 	free(element->filename);
 }
+#endif
 
 static void eval_issue_file(struct issue *ie,
 			    struct options *op,
