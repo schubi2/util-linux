@@ -197,7 +197,7 @@ int config_file_list( struct list_head *file_list,
 	struct list_head usr_file_list;
 	struct list_head *etc_entry = NULL, *usr_entry = NULL;
 	struct file_element *add_element = NULL, *usr_element = NULL, *etc_element = NULL;
-	int ret_usr = 0, ret_etc = 0, counter = 0;
+	int counter = 0;
 	
 	INIT_LIST_HEAD(file_list);
 
@@ -235,6 +235,7 @@ int config_file_list( struct list_head *file_list,
 	INIT_LIST_HEAD(&usr_file_list);
 
 #if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
+	int ret_usr = 0, ret_etc = 0;
         ret_etc = read_dir(&etc_file_list,
 			   project,
 			   etc_subdir,
