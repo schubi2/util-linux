@@ -79,7 +79,7 @@ static struct file_element *new_list_entry(const char *filename)
 
 #if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
 
-static int issuedir_filter(const struct dirent *d)
+static int filter(const struct dirent *d)
 {
 #ifdef _DIRENT_HAVE_D_TYPE
 	if (d->d_type != DT_UNKNOWN && d->d_type != DT_REG &&
@@ -139,7 +139,7 @@ static int read_dir( struct list_head *file_list,
 		return 0;
 	}
 
-	nfiles = scandirat(dd, ".", &namelist, issuedir_filter, alphasort);
+	nfiles = scandirat(dd, ".", &namelist, filter, alphasort);
 	if (nfiles <= 0) {
 		free(dirname);
 		return 0;
